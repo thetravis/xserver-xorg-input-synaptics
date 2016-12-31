@@ -57,11 +57,14 @@ static Bool pad_disabled
     /* internal flag, this does not correspond to device state */ ;
 static int ignore_modifier_combos;
 static int ignore_modifier_keys;
+static int disable_trackpoint;
 static int background;
 static const char *pid_file;
 static Display *display;
 static XDevice *dev;
+static XDevice *trackpoint;
 static Atom touchpad_off_prop;
+static Atom trackpoint_off_prop;
 static enum TouchpadState previous_state;
 static enum TouchpadState disable_state = TouchpadOff;
 static int verbose;
@@ -73,7 +76,7 @@ static void
 usage(void)
 {
     fprintf(stderr,
-            "Usage: syndaemon [-i idle-time] [-m poll-delay] [-d] [-t] [-k]\n");
+            "Usage: syndaemon [-i idle-time] [-m poll-delay] [-d] [-t] [-k] [-I]\n");
     fprintf(stderr,
             "  -i How many seconds to wait after the last key press before\n");
     fprintf(stderr, "     enabling the touchpad. (default is 2.0s)\n");
@@ -85,6 +88,7 @@ usage(void)
             "  -t Only disable tapping and scrolling, not mouse movements.\n");
     fprintf(stderr,
             "  -k Ignore modifier keys when monitoring keyboard activity.\n");
+    fprintf(stderr, "  -I Disable IBM TrackPoint in ThinkPads\n");
     fprintf(stderr, "  -K Like -k but also ignore Modifier+Key combos.\n");
     fprintf(stderr, "  -R Use the XRecord extension.\n");
     fprintf(stderr, "  -v Print diagnostic messages.\n");
@@ -115,10 +119,20 @@ static void
 toggle_touchpad(Bool enable)
 {
     unsigned char data;
+    unsigned char tp_data;
 
     if (pad_disabled && enable) {
         data = previous_state;
         pad_disabled = False;
+	if ( disable_trackpoint && trackpoint ) {
+	  if (verbose) {
+	    printf("Trackpoint enabled\n");
+	  }
+	  tp_data = 1;
+	  XChangeDeviceProperty(display, trackpoint, trackpoint_off_prop, XA_INTEGER, 8,
+                          PropModeReplace, &tp_data, 1);
+	}
+	  
         if (verbose)
             printf("Enable\n");
     }
@@ -127,6 +141,14 @@ toggle_touchpad(Bool enable)
         store_current_touchpad_state();
         pad_disabled = True;
         data = disable_state;
+        if ( disable_trackpoint && trackpoint ) {
+	  if (verbose) {
+	    printf("Trackpoint disabled\n");
+	  }
+	  tp_data = 0;
+          XChangeDeviceProperty(display, trackpoint, trackpoint_off_prop, XA_INTEGER, 8,
+                          PropModeReplace, &tp_data, 1);
+	}
         if (verbose)
             printf("Disable\n");
     }
@@ -136,6 +158,12 @@ toggle_touchpad(Bool enable)
     /* This potentially overwrites a different client's setting, but ... */
     XChangeDeviceProperty(display, dev, touchpad_off_prop, XA_INTEGER, 8,
                           PropModeReplace, &data, 1);
+//     if ( disable_trackpoint ) {
+//       XChangeDeviceProperty(display, trackpoint, trackpoint_off_prop, XA_INTEGER, 8,
+//                   PropModeReplace, &data, 1);
+//     }
+    
+    
     XFlush(display);
 }
 
@@ -485,12 +513,16 @@ dp_get_device(Display * dpy)
     XDeviceInfo *info = NULL;
     int ndevices = 0;
     Atom touchpad_type = 0;
+    Atom trackpoint_type = 0;
     Atom *properties = NULL;
     int nprops = 0;
     int error = 0;
+    int tpoint_error = 0;
 
     touchpad_type = XInternAtom(dpy, XI_TOUCHPAD, True);
     touchpad_off_prop = XInternAtom(dpy, SYNAPTICS_PROP_OFF, True);
+    trackpoint_type = XInternAtom(dpy, XI_MOUSE, True);
+    trackpoint_off_prop = XInternAtom (dpy, "Device Enabled", True);
     info = XListInputDevices(dpy, &ndevices);
 
     while (ndevices--) {
@@ -505,8 +537,8 @@ dp_get_device(Display * dpy)
 
             properties = XListDeviceProperties(dpy, dev, &nprops);
             if (!properties || !nprops) {
-                fprintf(stderr, "No properties on device '%s'.\n",
-                        info[ndevices].name);
+                fprintf(stderr, "No properties on device '%s'.\n", 
+			info[ndevices].name);
                 error = 1;
                 goto unwind;
             }
@@ -526,9 +558,53 @@ dp_get_device(Display * dpy)
         }
     }
 
+    /* Disable the TPPS/2 IBM TrackPoint also */
+    
+    if (disable_trackpoint ) {
+      char trackpoint_name[] = "TPPS/2 IBM TrackPoint";
+      info = XListInputDevices(dpy, &ndevices);
+      while (ndevices--) {
+        if (info[ndevices].type == trackpoint_type && strcmp(trackpoint_name, info[ndevices].name) == 0 ) {
+            trackpoint = XOpenDevice(dpy, info[ndevices].id);
+            if (!trackpoint) {
+                fprintf(stderr, "Failed to open device '%s'.\n",
+                        info[ndevices].name);
+                tpoint_error = 1;
+                goto unwind;
+            }
+
+            properties = XListDeviceProperties(dpy, trackpoint, &nprops);
+            if (!properties || !nprops) {
+                fprintf(stderr, "No properties on device '%s'.\n",
+                        info[ndevices].name);
+                tpoint_error = 1;
+                goto unwind;
+            }
+
+            while (nprops--) {
+                if (properties[nprops] == trackpoint_off_prop)
+                    break;
+            }
+            if (nprops < 0) {
+                fprintf(stderr, "No Enable/Disable properties on device '%s'.\n",
+                        info[ndevices].name);
+                tpoint_error = 1;
+                goto unwind;
+            }
+
+            break;              /* Yay, we found the trackpoint */
+        }
+      }
+    }
  unwind:
     XFree(properties);
     XFreeDeviceList(info);
+    if (!trackpoint) 
+        fprintf(stderr, "Unable to find TrackPoint.\n");
+    else if (tpoint_error && trackpoint) {
+        XCloseDevice(dpy, trackpoint);
+        trackpoint = NULL;
+    }
     if (!dev)
         fprintf(stderr, "Unable to find a synaptics device.\n");
     else if (error && dev) {
@@ -547,7 +623,7 @@ main(int argc, char *argv[])
     int use_xrecord = 0;
 
     /* Parse command line parameters */
-    while ((c = getopt(argc, argv, "i:m:dtp:kKR?v")) != EOF) {
+    while ((c = getopt(argc, argv, "i:m:dtp:kKR?vI")) != EOF) {
         switch (c) {
         case 'i':
             idle_time = atof(optarg);
@@ -577,6 +653,9 @@ main(int argc, char *argv[])
         case 'v':
             verbose = 1;
             break;
+	case 'I':
+	    disable_trackpoint = 1;
+	    break;
         case '?':
         default:
             usage();
