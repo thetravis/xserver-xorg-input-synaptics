@@ -136,16 +136,16 @@ toggle_touchpad(Bool enable)
     if (pad_disabled && enable) {
         data = previous_state;
         pad_disabled = False;
-	if (verbose)
+        if (verbose)
             printf("Enable\n");
-	
-	if ( disable_trackpoint && trackpoint ) {
-	  if (verbose) {
-	    printf("TrackPoint enabled\n");
-	  }
-	  trackpoint_state = Enabled;
-	  tp_data = trackpoint_state;
-	}	
+
+        if ( disable_trackpoint && trackpoint ) {
+          if (verbose) {
+            printf("TrackPoint enabled\n");
+          }
+          trackpoint_state = Enabled;
+          tp_data = trackpoint_state;
+        }
     }
     else if (!pad_disabled && !enable &&
              previous_state != disable_state && previous_state != TouchpadOff) {
@@ -154,14 +154,14 @@ toggle_touchpad(Bool enable)
         data = disable_state;
         if (verbose)
             printf("Disable\n");
-	
-	if ( disable_trackpoint && trackpoint ) {
-	  if (verbose) {
-	    printf("TrackPoint disabled\n");
-	  }
-	  trackpoint_state = Disabled;
-	  tp_data = trackpoint_state;
-	}
+
+        if ( disable_trackpoint && trackpoint ) {
+          if (verbose) {
+            printf("TrackPoint disabled\n");
+          }
+          trackpoint_state = Disabled;
+          tp_data = trackpoint_state;
+        }
     }
     else
         return;
@@ -586,7 +586,7 @@ dp_get_device(Display * dpy)
     }
 
     /* Disable the TPPS/2 IBM TrackPoint also */
-    
+
     if (disable_trackpoint ) {
       char trackpoint_name[] = "TPPS/2 IBM TrackPoint";
       info = XListInputDevices(dpy, &ndevices);
@@ -680,9 +680,9 @@ main(int argc, char *argv[])
         case 'v':
             verbose = 1;
             break;
-	case 'I':
-	    disable_trackpoint = 1;
-	    break;
+        case 'I':
+            disable_trackpoint = 1;
+            break;
         case '?':
         default:
             usage();
