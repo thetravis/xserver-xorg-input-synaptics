@@ -47,10 +47,21 @@
 
 #include "synaptics-properties.h"
 
+enum KeyboardActivity {
+    ActivityNew,
+    ActivityNone,
+    ActivityReset
+};
+
 enum TouchpadState {
     TouchpadOn = 0,
     TouchpadOff = 1,
     TappingOff = 2
+};
+
+enum TrackPointState {
+     Enabled = 1,
+     Disabled = 0
 };
 
 static Bool pad_disabled
@@ -67,6 +78,7 @@ static Atom touchpad_off_prop;
 static Atom trackpoint_off_prop;
 static enum TouchpadState previous_state;
 static enum TouchpadState disable_state = TouchpadOff;
+static enum TrackPointState trackpoint_state = Disabled;
 static int verbose;
 
 #define KEYMAP_SIZE 32
@@ -124,33 +136,32 @@ toggle_touchpad(Bool enable)
     if (pad_disabled && enable) {
         data = previous_state;
         pad_disabled = False;
+	if (verbose)
+            printf("Enable\n");
+	
 	if ( disable_trackpoint && trackpoint ) {
 	  if (verbose) {
-	    printf("Trackpoint enabled\n");
+	    printf("TrackPoint enabled\n");
 	  }
-	  tp_data = 1;
-	  XChangeDeviceProperty(display, trackpoint, trackpoint_off_prop, XA_INTEGER, 8,
-                          PropModeReplace, &tp_data, 1);
-	}
-	  
-        if (verbose)
-            printf("Enable\n");
+	  trackpoint_state = Enabled;
+	  tp_data = trackpoint_state;
+	}	
     }
     else if (!pad_disabled && !enable &&
              previous_state != disable_state && previous_state != TouchpadOff) {
         store_current_touchpad_state();
         pad_disabled = True;
         data = disable_state;
-        if ( disable_trackpoint && trackpoint ) {
-	  if (verbose) {
-	    printf("Trackpoint disabled\n");
-	  }
-	  tp_data = 0;
-          XChangeDeviceProperty(display, trackpoint, trackpoint_off_prop, XA_INTEGER, 8,
-                          PropModeReplace, &tp_data, 1);
-	}
         if (verbose)
             printf("Disable\n");
+	
+	if ( disable_trackpoint && trackpoint ) {
+	  if (verbose) {
+	    printf("TrackPoint disabled\n");
+	  }
+	  trackpoint_state = Disabled;
+	  tp_data = trackpoint_state;
+	}
     }
     else
         return;
@@ -158,12 +169,10 @@ toggle_touchpad(Bool enable)
     /* This potentially overwrites a different client's setting, but ... */
     XChangeDeviceProperty(display, dev, touchpad_off_prop, XA_INTEGER, 8,
                           PropModeReplace, &data, 1);
-//     if ( disable_trackpoint ) {
-//       XChangeDeviceProperty(display, trackpoint, trackpoint_off_prop, XA_INTEGER, 8,
-//                   PropModeReplace, &data, 1);
-//     }
-    
-    
+    if (disable_trackpoint && trackpoint) {
+        XChangeDeviceProperty(display, trackpoint, trackpoint_off_prop, XA_INTEGER, 8,
+                          PropModeReplace, &tp_data, 1);
+    }
     XFlush(display);
 }
 
@@ -209,29 +218,29 @@ install_signal_handler(void)
     }
 }
 
-/**
- * Return non-zero if the keyboard state has changed since the last call.
- */
-static int
+static enum KeyboardActivity
 keyboard_activity(Display * display)
 {
     static unsigned char old_key_state[KEYMAP_SIZE];
     unsigned char key_state[KEYMAP_SIZE];
     int i;
-    int ret = 0;
+    int ret = ActivityNone;
 
     XQueryKeymap(display, (char *) key_state);
 
     for (i = 0; i < KEYMAP_SIZE; i++) {
         if ((key_state[i] & ~old_key_state[i]) & keyboard_mask[i]) {
-            ret = 1;
+            ret = ActivityNew;
             break;
         }
     }
     if (ignore_modifier_combos) {
         for (i = 0; i < KEYMAP_SIZE; i++) {
             if (key_state[i] & ~keyboard_mask[i]) {
-                ret = 0;
+                if (old_key_state[i] & ~keyboard_mask[i])
+                    ret = ActivityNone;
+                else
+                    ret = ActivityReset;
                 break;
             }
         }
@@ -260,8 +269,17 @@ main_loop(Display * display, double idle_time, int poll_delay)
 
     for (;;) {
         current_time = get_time();
-        if (keyboard_activity(display))
-            last_activity = current_time;
+        switch (keyboard_activity(display)) {
+            case ActivityNew:
+                last_activity = current_time;
+                break;
+            case ActivityNone:
+                /* NOP */;
+                break;
+            case ActivityReset:
+                last_activity = 0.0;
+                break;
+        }
 
         /* If system times goes backwards, touchpad can get locked. Make
          * sure our last activity wasn't in the future and reset if it was. */
@@ -451,6 +469,7 @@ record_main_loop(Display * display, double idle_time)
         fd_set read_fds;
         int ret;
         int disable_event = 0;
+        int modifier_event = 0;
         struct timeval timeout;
 
         FD_ZERO(&read_fds);
@@ -482,9 +501,14 @@ record_main_loop(Display * display, double idle_time)
                 disable_event = 1;
             }
 
-            if (cbres.non_modifier_event &&
-                !(ignore_modifier_combos && is_modifier_pressed(&cbres))) {
-                disable_event = 1;
+            if (cbres.non_modifier_event) {
+                if (ignore_modifier_combos && is_modifier_pressed(&cbres)) {
+                    modifier_event = 1;
+                } else {
+                    disable_event = 1;
+                }
+            } else if (ignore_modifier_keys) {
+                modifier_event = 1;
             }
         }
 
@@ -496,10 +520,13 @@ record_main_loop(Display * display, double idle_time)
             toggle_touchpad(False);
         }
 
-        if (ret == 0 && pad_disabled) { /* timeout => enable event */
+        if (modifier_event && pad_disabled) {
             toggle_touchpad(True);
         }
 
+        if (ret == 0 && pad_disabled) { /* timeout => enable event */
+            toggle_touchpad(True);
+        }
     }                           /* end while(1) */
 
     XFreeModifiermap(cbres.modifiers);
@@ -537,8 +564,8 @@ dp_get_device(Display * dpy)
 
             properties = XListDeviceProperties(dpy, dev, &nprops);
             if (!properties || !nprops) {
-                fprintf(stderr, "No properties on device '%s'.\n", 
-			info[ndevices].name);
+                fprintf(stderr, "No properties on device '%s'.\n",
+                        info[ndevices].name);
                 error = 1;
                 goto unwind;
             }
